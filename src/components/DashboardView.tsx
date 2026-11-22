@@ -9,7 +9,6 @@ import {
   milestoneSpecs,
 } from '../data/milestones';
 import { digitalTokens } from '../data/tokens';
-import { OAuthError } from '../utils/authApi';
 import { dateKeyToLocalDate } from '../utils/streak';
 import { DigitalTokenBadge, TokenMedallionSvg } from './DigitalTokenBadge';
 import { MilestoneBadgeCard } from './MilestoneBadge';
@@ -35,15 +34,10 @@ export function DashboardView() {
     isLessonUnlocked,
     isLanguageUnlocked,
     resetProgress,
-    user,
-    switchGoogleAccount,
-    signOutUser,
   } = useApp();
 
   const prefersReduced = useReducedMotion();
   const [confirmReset, setConfirmReset] = useState(false);
-  const [switchingAccount, setSwitchingAccount] = useState(false);
-  const [accountError, setAccountError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<TokenStatusFilter>('all');
   const [trackFilter, setTrackFilter] = useState<string>('all');
   const [milestoneStatusFilter, setMilestoneStatusFilter] = useState<TokenStatusFilter>('all');
@@ -898,76 +892,6 @@ export function DashboardView() {
             <p className="mt-1 text-xs text-[#777777] dark:text-[#A3A3A3]">
               {t.dashboard.settingsDesc}
             </p>
-
-            {/* Connected Google Account */}
-            {user && (
-              <div className="mt-6 border-t border-[#E7E7E7] pt-5 dark:border-[#262626]">
-                <p className="text-sm font-medium text-[#111111] dark:text-white">
-                  {t.auth.accountLabel}
-                </p>
-                <div className="mt-2.5 rounded border border-[#E7E7E7] bg-[#F5F5F5] p-3.5 dark:border-[#262626] dark:bg-[#111111]">
-                  {user.displayName && (
-                    <p className="text-xs font-semibold text-[#111111] dark:text-white">
-                      {user.displayName}
-                    </p>
-                  )}
-                  {user.email && (
-                    <p className="mt-0.5 truncate font-mono text-xs text-[#777777] dark:text-[#A3A3A3]">
-                      {user.email}
-                    </p>
-                  )}
-                  <p className="mt-2 text-[11px] leading-relaxed text-[#777777] dark:text-[#A3A3A3]">
-                    {t.auth.accountSyncNote}
-                  </p>
-                </div>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <motion.button
-                    type="button"
-                    disabled={switchingAccount}
-                    whileTap={{ scale: 0.96 }}
-                    onClick={async () => {
-                      setAccountError(null);
-                      setSwitchingAccount(true);
-                      try {
-                        await switchGoogleAccount();
-                      } catch (err: unknown) {
-                        if (err instanceof OAuthError) {
-                          if (err.code === 'auth/popup-closed-by-user') {
-                            setAccountError(t.auth.errorCancelled);
-                          } else if (err.code === 'auth/popup-blocked') {
-                            setAccountError(t.auth.errorPopupBlocked);
-                          } else if (err.code === 'OAUTH_NOT_CONFIGURED') {
-                            setAccountError(t.auth.errorNotConfigured);
-                          } else {
-                            setAccountError(t.auth.errorGeneric);
-                          }
-                        } else {
-                          setAccountError(t.auth.errorGeneric);
-                        }
-                      } finally {
-                        setSwitchingAccount(false);
-                      }
-                    }}
-                    className="inline-flex h-9 items-center rounded border border-[#111111] bg-[#111111] px-3.5 text-xs font-medium text-white transition-colors hover:bg-[#2B2B2B] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white dark:bg-white dark:text-[#111111] dark:hover:bg-[#E7E7E7]"
-                  >
-                    {switchingAccount ? t.auth.switchingAccount : t.auth.switchAccount}
-                  </motion.button>
-                  <motion.button
-                    type="button"
-                    whileTap={{ scale: 0.96 }}
-                    onClick={signOutUser}
-                    className="inline-flex h-9 items-center rounded border border-[#E7E7E7] px-3.5 text-xs font-medium text-[#777777] transition-colors hover:border-[#111111] hover:text-[#111111] dark:border-[#333333] dark:text-[#A3A3A3] dark:hover:border-white dark:hover:text-white"
-                  >
-                    {t.auth.signOut}
-                  </motion.button>
-                </div>
-                {accountError && (
-                  <p className="mt-2 text-xs text-[#777777] dark:text-[#A3A3A3]">
-                    {accountError}
-                  </p>
-                )}
-              </div>
-            )}
 
             {/* Language Preference */}
             <div className="mt-6 border-t border-[#E7E7E7] pt-5 dark:border-[#262626]">

@@ -1,6 +1,6 @@
 export type Language = 'en' | 'ar';
 export type Theme = 'light' | 'dark';
-export type AppView = 'landing' | 'roadmap' | 'lesson' | 'playground' | 'stack3d' | 'dashboard' | 'signin';
+export type AppView = 'landing' | 'roadmap' | 'lesson' | 'playground' | 'stack3d' | 'dashboard';
 
 export interface Translations {
   brand: string;
@@ -303,26 +303,6 @@ export interface Translations {
     milestoneEmptyTitle: string;
     milestoneEmptyDesc: string;
     milestoneJumpBtn: string;
-  };
-  auth: {
-    title: string;
-    subtitle: string;
-    continueWithGoogle: string;
-    switchAccount: string;
-    switchingAccount: string;
-    signingIn: string;
-    signInNav: string;
-    signOut: string;
-    signedInAs: string;
-    accountLabel: string;
-    accountSyncNote: string;
-    loadingWorkspace: string;
-    goToDashboard: string;
-    googleOnlyNote: string;
-    errorCancelled: string;
-    errorPopupBlocked: string;
-    errorNotConfigured: string;
-    errorGeneric: string;
   };
   footer: {
     copyright: string;
@@ -668,26 +648,6 @@ export const translations: Record<Language, Translations> = {
         'Keep completing modules, 2-lesson review checkpoints, and daily streaks to unlock crests here.',
       milestoneJumpBtn: 'Open Related Track',
     },
-    auth: {
-      title: 'Sign in to CodePath',
-      subtitle: 'Use your Google account to access your student workspace and learning path.',
-      continueWithGoogle: 'Continue with Google',
-      switchAccount: 'Switch Google Account',
-      switchingAccount: 'Switching account...',
-      signingIn: 'Signing in...',
-      signInNav: 'Sign In',
-      signOut: 'Sign Out',
-      signedInAs: 'Signed in with Google',
-      accountLabel: 'Google Account',
-      accountSyncNote: 'Your progress is saved to this account and starts at 0 for any new account.',
-      loadingWorkspace: 'Loading your account progress...',
-      goToDashboard: 'Go to Dashboard',
-      googleOnlyNote: 'CodePath uses Google authentication exclusively for secure, passwordless access.',
-      errorCancelled: 'Sign-in window was closed before completing authentication.',
-      errorPopupBlocked: 'Sign-in popup was blocked. Please allow popups for this site and try again.',
-      errorNotConfigured: 'Google OAuth credentials (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET) are not configured on the server yet.',
-      errorGeneric: 'Unable to sign in with Google right now. Please try again.',
-    },
     footer: {
       copyright: '© 2026 CodePath. All rights reserved.',
       builtFor: 'Learn. Practice. Build. Deploy.',
@@ -1029,26 +989,6 @@ export const translations: Record<Language, Translations> = {
       milestoneEmptyDesc:
         'استمر في إتمام الشباتر ومحطات المراجعة والسلاسل اليومية لفتح الأوسمة هنا.',
       milestoneJumpBtn: 'انتقل للمسار المرتبط',
-    },
-    auth: {
-      title: 'تسجيل الدخول إلى CodePath',
-      subtitle: 'استخدم حساب Google الخاص بك للوصول إلى مساحة التعلّم ومسارك الدراسي.',
-      continueWithGoogle: 'المتابعة باستخدام Google',
-      switchAccount: 'تبديل حساب Google',
-      switchingAccount: 'جاري تبديل الحساب...',
-      signingIn: 'جاري تسجيل الدخول...',
-      signInNav: 'تسجيل الدخول',
-      signOut: 'تسجيل الخروج',
-      signedInAs: 'تم تسجيل الدخول عبر Google',
-      accountLabel: 'حساب Google',
-      accountSyncNote: 'يتم حفظ تقدمك في هذا الحساب، ويبدأ أي حساب جديد من الصفر.',
-      loadingWorkspace: 'جاري تحميل تقدم حسابك...',
-      goToDashboard: 'الانتقال إلى لوحة الطالب',
-      googleOnlyNote: 'تستخدم منصة CodePath تسجيل الدخول عبر Google فقط للوصول الآمن بدون كلمات مرور.',
-      errorCancelled: 'تم إغلاق نافذة تسجيل الدخول قبل إتمام العملية.',
-      errorPopupBlocked: 'تم حظر نافذة تسجيل الدخول المنبثقة. يرجى السماح بالنوافذ المنبثقة والمحاولة مرة أخرى.',
-      errorNotConfigured: 'بيانات اعتماد Google OAuth (GOOGLE_CLIENT_ID و GOOGLE_CLIENT_SECRET) غير مهيأة على الخادم بعد.',
-      errorGeneric: 'تعذّر تسجيل الدخول عبر Google حالياً. يرجى المحاولة مرة أخرى.',
     },
     footer: {
       copyright: '© 2026 CodePath. جميع الحقوق محفوظة.',

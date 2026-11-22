@@ -7,19 +7,12 @@ import {
 } from '../data/milestones';
 import { EarnedTokenRecord, getTokenForLesson } from '../data/tokens';
 import {
-  AuthUser,
-  fetchCurrentSession,
-  logoutSession,
-  openGoogleOAuthPopup,
-} from '../utils/authApi';
-import {
-  AccountWorkspaceSnapshot,
-  clearAccountSnapshot,
+  clearWorkspaceSnapshot,
   LessonTab,
-  loadAccountSnapshot,
-  RemoteProgressPayload,
+  loadWorkspaceSnapshot,
   ResumableView,
-  saveAccountSnapshot,
+  saveWorkspaceSnapshot,
+  WorkspaceProgressPayload,
 } from '../utils/progressSync';
 import {
   calculateStreakStats,
@@ -67,63 +60,22 @@ interface AppContextValue {
   savePlaygroundCode: (code?: PlaygroundStarter) => void;
   loadStarterInPlayground: (starter: PlaygroundStarter) => void;
   resetProgress: () => void;
-  user: AuthUser | null;
-  authLoading: boolean;
-  progressReady: boolean;
-  signInWithGoogle: () => Promise<void>;
-  switchGoogleAccount: () => Promise<void>;
-  signOutUser: () => Promise<void>;
 }
 
-const PREF_STORAGE_KEYS = {
+const STORAGE_KEYS = {
   lang: 'codepath_lang',
   theme: 'codepath_theme',
+  playground: 'codepath_playground_code',
 };
 
-const LEGACY_PROGRESS_KEYS = [
-  'codepath_completed_lessons',
-  'codepath_read_lessons',
-  'codepath_passed_exercises',
-  'codepath_quiz_scores',
-  'codepath_earned_tokens',
-  'codepath_earned_achievements',
-  'codepath_game_high_scores',
-  'codepath_completion_dates',
-  'codepath_playground_code',
-  'codepath_progress_epoch',
-];
-
-function clearLegacyLocalProgress(): void {
-  if (typeof window === 'undefined') return;
+function loadPlaygroundCode(): PlaygroundStarter {
+  if (typeof window === 'undefined') return playgroundTemplates.card;
   try {
-    for (const key of LEGACY_PROGRESS_KEYS) {
-      localStorage.removeItem(key);
-    }
-  } catch {
-    // Ignore storage errors in restricted contexts
-  }
-}
-
-clearLegacyLocalProgress();
-
-function getPlaygroundStorageKey(uid: string): string {
-  return `codepath_playground_code_${uid}`;
-}
-
-function loadUserPlaygroundCode(uid: string | null | undefined): PlaygroundStarter {
-  if (!uid || typeof window === 'undefined') return playgroundTemplates.card;
-  try {
-    const raw = localStorage.getItem(getPlaygroundStorageKey(uid));
+    const raw = localStorage.getItem(STORAGE_KEYS.playground);
     return raw ? (JSON.parse(raw) as PlaygroundStarter) : playgroundTemplates.card;
   } catch {
     return playgroundTemplates.card;
   }
-}
-
-function getInitialViewFromPath(): AppView {
-  const path = window.location.pathname.replace(/\/+$/, '');
-  if (path === '/signin') return 'signin';
-  return 'roadmap';
 }
 
 function isLessonUnlockedWith(lessonId: string, doneList: string[]): boolean {
@@ -142,7 +94,7 @@ function isLanguageUnlockedWith(languageId: string, doneList: string[]): boolean
   return prevLangLessons.length > 0 && prevLangLessons.every((l) => doneList.includes(l.id));
 }
 
-function createEmptyProgress(): RemoteProgressPayload {
+function createEmptyProgress(): WorkspaceProgressPayload {
   return {
     completedLessons: [],
     readLessons: [],
@@ -151,46 +103,143 @@ function createEmptyProgress(): RemoteProgressPayload {
     completionDates: [],
     activeLessonId: lessons[0].id,
     selectedLanguageId: null,
-    lastView: 'roadmap',
+    lastView: 'landing',
     activeLessonTab: 'learn',
+  };
+}
+
+function buildInitialWorkspace() {
+  const saved = loadWorkspaceSnapshot();
+  if (!saved) {
+    return {
+      progress: createEmptyProgress(),
+      tokens: {} as Record<string, EarnedTokenRecord>,
+      achievements: {} as Record<string, EarnedAchievementRecord>,
+    };
+  }
+
+  const remote = saved.progress;
+  const completedLessons = Array.isArray(remote.completedLessons) ? remote.completedLessons : [];
+  const readLessons = Array.isArray(remote.readLessons) ? remote.readLessons : [];
+  const passedExercises = Array.isArray(remote.passedExercises) ? remote.passedExercises : [];
+  const quizScores =
+    remote.quizScores && typeof remote.quizScores === 'object' ? remote.quizScores : {};
+  const completionDates = sanitizeDateList(remote.completionDates);
+
+  const firstIncomplete =
+    lessons.find((l) => !completedLessons.includes(l.id))?.id ?? lessons[0].id;
+  const restoredLessonId =
+    remote.activeLessonId && isLessonUnlockedWith(remote.activeLessonId, completedLessons)
+      ? remote.activeLessonId
+      : firstIncomplete;
+  const restoredLessonObj = lessons.find((l) => l.id === restoredLessonId) ?? lessons[0];
+
+  let restoredLanguageId: string | null = null;
+  if (
+    remote.selectedLanguageId &&
+    isLanguageUnlockedWith(remote.selectedLanguageId, completedLessons)
+  ) {
+    restoredLanguageId = remote.selectedLanguageId;
+  } else if (remote.lastView === 'lesson') {
+    restoredLanguageId = restoredLessonObj.languageId;
+  }
+
+  const lessonIsDone = completedLessons.includes(restoredLessonId);
+  const lessonIsRead = lessonIsDone || readLessons.includes(restoredLessonId);
+  const lessonExPassed = lessonIsDone || passedExercises.includes(restoredLessonId);
+  let restoredTab: LessonTab = 'learn';
+  if (remote.activeLessonTab === 'assessment' && lessonExPassed) {
+    restoredTab = 'assessment';
+  } else if (remote.activeLessonTab === 'practice' && lessonIsRead) {
+    restoredTab = 'practice';
+  }
+
+  const nextTokens: Record<string, EarnedTokenRecord> = { ...(saved.tokens ?? {}) };
+  for (const lessonId of completedLessons) {
+    if (!nextTokens[lessonId]) {
+      const spec = getTokenForLesson(lessonId);
+      if (spec) {
+        nextTokens[lessonId] = {
+          uid: 'local',
+          lessonId,
+          tokenCode: spec.tokenCode,
+          languageId: spec.languageId,
+          order: spec.index,
+          earnedAt: new Date().toISOString(),
+        };
+      }
+    }
+  }
+
+  return {
+    progress: {
+      completedLessons,
+      readLessons,
+      passedExercises,
+      quizScores,
+      completionDates,
+      activeLessonId: restoredLessonId,
+      selectedLanguageId: restoredLanguageId,
+      lastView: remote.lastView ?? 'landing',
+      activeLessonTab: restoredTab,
+    },
+    tokens: nextTokens,
+    achievements: saved.achievements ?? {},
   };
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
+  const initialRef = useRef<ReturnType<typeof buildInitialWorkspace> | null>(null);
+  if (!initialRef.current) {
+    initialRef.current = buildInitialWorkspace();
+  }
+  const initial = initialRef.current;
+
   const [lang, setLangState] = useState<Language>(() => {
-    const saved = localStorage.getItem(PREF_STORAGE_KEYS.lang);
+    const saved = localStorage.getItem(STORAGE_KEYS.lang);
     return saved === 'ar' ? 'ar' : 'en';
   });
 
   const [theme, setThemeState] = useState<Theme>(() => {
-    const saved = localStorage.getItem(PREF_STORAGE_KEYS.theme);
+    const saved = localStorage.getItem(STORAGE_KEYS.theme);
     return saved === 'dark' ? 'dark' : 'light';
   });
 
-  const [view, setViewState] = useState<AppView>(getInitialViewFromPath);
-  const [selectedLanguageId, setSelectedLanguageIdState] = useState<string | null>(null);
-  const [activeLessonId, setActiveLessonId] = useState<string>(lessons[0].id);
-  const [activeLessonTab, setActiveLessonTabState] = useState<LessonTab>('learn');
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [authLoading, setAuthLoading] = useState<boolean>(true);
-  const [progressReady, setProgressReady] = useState<boolean>(false);
+  const [view, setViewState] = useState<AppView>(initial.progress.lastView ?? 'landing');
+  const [selectedLanguageId, setSelectedLanguageIdState] = useState<string | null>(
+    initial.progress.selectedLanguageId ?? null
+  );
+  const [activeLessonId, setActiveLessonId] = useState<string>(
+    initial.progress.activeLessonId ?? lessons[0].id
+  );
+  const [activeLessonTab, setActiveLessonTabState] = useState<LessonTab>(
+    initial.progress.activeLessonTab ?? 'learn'
+  );
 
-  const [completedLessons, setCompletedLessons] = useState<string[]>([]);
-  const [readLessons, setReadLessons] = useState<string[]>([]);
-  const [passedExercises, setPassedExercises] = useState<string[]>([]);
-  const [quizScores, setQuizScores] = useState<Record<string, number>>({});
-  const [earnedTokens, setEarnedTokens] = useState<Record<string, EarnedTokenRecord>>({});
-  const [completionDates, setCompletionDates] = useState<string[]>([]);
+  const [completedLessons, setCompletedLessons] = useState<string[]>(
+    initial.progress.completedLessons
+  );
+  const [readLessons, setReadLessons] = useState<string[]>(initial.progress.readLessons);
+  const [passedExercises, setPassedExercises] = useState<string[]>(
+    initial.progress.passedExercises
+  );
+  const [quizScores, setQuizScores] = useState<Record<string, number>>(initial.progress.quizScores);
+  const [earnedTokens, setEarnedTokens] = useState<Record<string, EarnedTokenRecord>>(
+    initial.tokens
+  );
+  const [completionDates, setCompletionDates] = useState<string[]>(
+    initial.progress.completionDates
+  );
   const [earnedAchievements, setEarnedAchievements] = useState<
     Record<string, EarnedAchievementRecord>
-  >({});
+  >(initial.achievements);
 
   const [todayKey, setTodayKey] = useState<string>(() => getLocalDateKey());
-  const [playgroundCode, setPlaygroundCode] = useState<PlaygroundStarter>(playgroundTemplates.card);
+  const [playgroundCode, setPlaygroundCode] = useState<PlaygroundStarter>(loadPlaygroundCode);
 
-  const progressRef = useRef<RemoteProgressPayload>(createEmptyProgress());
+  const progressRef = useRef<WorkspaceProgressPayload>(initial.progress);
   progressRef.current = {
     completedLessons,
     readLessons,
@@ -199,7 +248,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     completionDates,
     activeLessonId,
     selectedLanguageId,
-    lastView: view === 'signin' ? (progressRef.current.lastView ?? 'roadmap') : view,
+    lastView: view,
     activeLessonTab,
   };
 
@@ -209,33 +258,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const earnedAchievementsRef = useRef<Record<string, EarnedAchievementRecord>>(earnedAchievements);
   earnedAchievementsRef.current = earnedAchievements;
 
-  const activeUidRef = useRef<string | null>(null);
-  const initialHydrationDoneRef = useRef<string | null>(null);
-  const navSyncTimerRef = useRef<number | null>(null);
-
-  const cancelPendingNavSync = () => {
-    if (navSyncTimerRef.current !== null) {
-      window.clearTimeout(navSyncTimerRef.current);
-      navSyncTimerRef.current = null;
+  // Normalize old /signin URL if present
+  useEffect(() => {
+    if (window.location.pathname.replace(/\/+$/, '') === '/signin') {
+      window.history.replaceState({}, '', '/');
     }
-  };
-
-  const resetInMemoryProgress = (nextUid?: string | null) => {
-    cancelPendingNavSync();
-    const empty = createEmptyProgress();
-    progressRef.current = empty;
-    setCompletedLessons([]);
-    setReadLessons([]);
-    setPassedExercises([]);
-    setQuizScores({});
-    setCompletionDates([]);
-    setEarnedTokens({});
-    setEarnedAchievements({});
-    setActiveLessonId(lessons[0].id);
-    setActiveLessonTabState('learn');
-    setSelectedLanguageIdState(null);
-    setPlaygroundCode(loadUserPlaygroundCode(nextUid));
-  };
+  }, []);
 
   // Keep today's local date synced if the tab remains open across midnight
   useEffect(() => {
@@ -253,259 +281,53 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // Check existing Google OAuth session cookie on boot
-  useEffect(() => {
-    let cancelled = false;
-    void fetchCurrentSession().then((sessionUser) => {
-      if (cancelled) return;
-      if (!sessionUser) {
-        activeUidRef.current = null;
-        initialHydrationDoneRef.current = null;
-        resetInMemoryProgress(null);
-        setProgressReady(false);
-        setUser(null);
-        setViewState('signin');
-        if (window.location.pathname !== '/signin') {
-          window.history.replaceState({}, '', '/signin');
-        }
-      } else {
-        activeUidRef.current = sessionUser.uid;
-        initialHydrationDoneRef.current = null;
-        resetInMemoryProgress(sessionUser.uid);
-        setProgressReady(false);
-        setUser(sessionUser);
-      }
-      setAuthLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Hydrate account progress & exact stopping point when authenticated user changes
-  useEffect(() => {
-    if (!user?.uid) return;
-
-    const uid = user.uid;
-    let cancelled = false;
-    activeUidRef.current = uid;
-    initialHydrationDoneRef.current = null;
-    resetInMemoryProgress(uid);
-    setProgressReady(false);
-
-    void loadAccountSnapshot(uid).then((snapshot) => {
-      if (cancelled || activeUidRef.current !== uid) return;
-
-      if (!snapshot) {
-        // Brand new Google account — start strictly from 0
-        const fresh = createEmptyProgress();
-        const freshSnapshot: AccountWorkspaceSnapshot = {
-          progress: fresh,
-          tokens: {},
-          achievements: {},
-        };
-        progressRef.current = fresh;
-        setCompletedLessons([]);
-        setReadLessons([]);
-        setPassedExercises([]);
-        setQuizScores({});
-        setCompletionDates([]);
-        setEarnedTokens({});
-        setEarnedAchievements({});
-        setActiveLessonId(lessons[0].id);
-        setActiveLessonTabState('learn');
-        setSelectedLanguageIdState(null);
-        setViewState('roadmap');
-        if (window.location.pathname.replace(/\/+$/, '') === '/signin') {
-          window.history.replaceState({}, '', '/');
-        }
-        initialHydrationDoneRef.current = uid;
-        setProgressReady(true);
-        void saveAccountSnapshot(uid, freshSnapshot);
-        return;
-      }
-
-      const remote = snapshot.progress;
-      const firstIncomplete =
-        lessons.find((l) => !remote.completedLessons.includes(l.id))?.id ?? lessons[0].id;
-      const restoredLessonId =
-        remote.activeLessonId &&
-        isLessonUnlockedWith(remote.activeLessonId, remote.completedLessons)
-          ? remote.activeLessonId
-          : firstIncomplete;
-      const restoredLessonObj = lessons.find((l) => l.id === restoredLessonId) ?? lessons[0];
-
-      let restoredLanguageId: string | null = null;
-      if (
-        remote.selectedLanguageId &&
-        isLanguageUnlockedWith(remote.selectedLanguageId, remote.completedLessons)
-      ) {
-        restoredLanguageId = remote.selectedLanguageId;
-      } else if (remote.lastView === 'lesson') {
-        restoredLanguageId = restoredLessonObj.languageId;
-      }
-
-      const lessonIsDone = remote.completedLessons.includes(restoredLessonId);
-      const lessonIsRead = lessonIsDone || remote.readLessons.includes(restoredLessonId);
-      const lessonExPassed = lessonIsDone || remote.passedExercises.includes(restoredLessonId);
-      let restoredTab: LessonTab = 'learn';
-      if (remote.activeLessonTab === 'assessment' && lessonExPassed) {
-        restoredTab = 'assessment';
-      } else if (remote.activeLessonTab === 'practice' && lessonIsRead) {
-        restoredTab = 'practice';
-      }
-
-      const restoredView: ResumableView = remote.lastView ?? 'roadmap';
-
-      // Ensure any completed lessons have their digital tokens minted
-      const nextTokens: Record<string, EarnedTokenRecord> = { ...(snapshot.tokens ?? {}) };
-      for (const lessonId of remote.completedLessons) {
-        if (!nextTokens[lessonId]) {
-          const spec = getTokenForLesson(lessonId);
-          if (spec) {
-            nextTokens[lessonId] = {
-              uid,
-              lessonId,
-              tokenCode: spec.tokenCode,
-              languageId: spec.languageId,
-              order: spec.index,
-              earnedAt: new Date().toISOString(),
-            };
-          }
-        }
-      }
-
-      const nextProgress: RemoteProgressPayload = {
-        completedLessons: remote.completedLessons,
-        readLessons: remote.readLessons,
-        passedExercises: remote.passedExercises,
-        quizScores: remote.quizScores,
-        completionDates: remote.completionDates,
-        activeLessonId: restoredLessonId,
-        selectedLanguageId: restoredLanguageId,
-        lastView: restoredView,
-        activeLessonTab: restoredTab,
-      };
-
-      progressRef.current = nextProgress;
-      earnedTokensRef.current = nextTokens;
-      earnedAchievementsRef.current = snapshot.achievements ?? {};
-
-      setCompletedLessons(remote.completedLessons);
-      setReadLessons(remote.readLessons);
-      setPassedExercises(remote.passedExercises);
-      setQuizScores(remote.quizScores);
-      setCompletionDates(remote.completionDates);
-      setEarnedTokens(nextTokens);
-      setEarnedAchievements(snapshot.achievements ?? {});
-      setActiveLessonId(restoredLessonId);
-      setSelectedLanguageIdState(restoredLanguageId);
-      setActiveLessonTabState(restoredTab);
-      setViewState(restoredView);
-
-      if (window.location.pathname.replace(/\/+$/, '') === '/signin') {
-        window.history.replaceState({}, '', '/');
-      }
-
-      initialHydrationDoneRef.current = uid;
-      setProgressReady(true);
-    });
-
-    return () => {
-      cancelled = true;
-      cancelPendingNavSync();
-    };
-  }, [user?.uid]);
-
-  // Sync browser back/forward navigation with /signin route
-  useEffect(() => {
-    const onPopState = () => {
-      if (!activeUidRef.current) {
-        setViewState('signin');
-        return;
-      }
-      setViewState(getInitialViewFromPath());
-    };
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
-  }, []);
-
   const persistSnapshotNow = (
-    nextProgress: RemoteProgressPayload,
+    nextProgress: WorkspaceProgressPayload,
     nextTokens: Record<string, EarnedTokenRecord> = earnedTokensRef.current,
     nextAchievements: Record<string, EarnedAchievementRecord> = earnedAchievementsRef.current
   ) => {
-    const uid = user?.uid;
-    if (!uid || activeUidRef.current !== uid || initialHydrationDoneRef.current !== uid) {
-      return;
-    }
-    void saveAccountSnapshot(uid, {
+    saveWorkspaceSnapshot({
       progress: nextProgress,
       tokens: nextTokens,
       achievements: nextAchievements,
     });
   };
 
-  const scheduleNavigationSync = () => {
-    const uid = user?.uid;
-    if (!uid || activeUidRef.current !== uid || initialHydrationDoneRef.current !== uid) {
-      return;
-    }
-    cancelPendingNavSync();
-    navSyncTimerRef.current = window.setTimeout(() => {
-      navSyncTimerRef.current = null;
-      if (activeUidRef.current !== uid || initialHydrationDoneRef.current !== uid) {
-        return;
-      }
-      persistSnapshotNow(progressRef.current);
-    }, 0);
-  };
-
   const setView = (nextView: AppView) => {
-    if (!activeUidRef.current && nextView !== 'signin') {
-      setViewState('signin');
-      if (window.location.pathname !== '/signin') {
-        window.history.pushState({}, '', '/signin');
-      }
-      return;
-    }
     setViewState(nextView);
-    if (nextView !== 'signin') {
-      progressRef.current = {
-        ...progressRef.current,
-        lastView: nextView,
-      };
-      scheduleNavigationSync();
-    }
-    const targetPath = nextView === 'signin' ? '/signin' : '/';
-    if (window.location.pathname !== targetPath) {
-      window.history.pushState({}, '', targetPath);
-    }
+    const nextProgress: WorkspaceProgressPayload = {
+      ...progressRef.current,
+      lastView: nextView as ResumableView,
+    };
+    progressRef.current = nextProgress;
+    persistSnapshotNow(nextProgress);
   };
 
   const setSelectedLanguageId = (languageId: string | null) => {
     setSelectedLanguageIdState(languageId);
-    progressRef.current = {
+    const nextProgress: WorkspaceProgressPayload = {
       ...progressRef.current,
       selectedLanguageId: languageId,
     };
-    scheduleNavigationSync();
+    progressRef.current = nextProgress;
+    persistSnapshotNow(nextProgress);
   };
 
   const setActiveLessonTab = (nextTab: LessonTab) => {
     setActiveLessonTabState(nextTab);
-    progressRef.current = {
+    const nextProgress: WorkspaceProgressPayload = {
       ...progressRef.current,
       activeLessonTab: nextTab,
     };
-    scheduleNavigationSync();
+    progressRef.current = nextProgress;
+    persistSnapshotNow(nextProgress);
   };
 
   // Sync language direction and document lang
   useEffect(() => {
     document.documentElement.lang = lang;
     document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
-    localStorage.setItem(PREF_STORAGE_KEYS.lang, lang);
+    localStorage.setItem(STORAGE_KEYS.lang, lang);
   }, [lang]);
 
   // Sync dark mode class on <html>
@@ -515,7 +337,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     } else {
       document.documentElement.classList.remove('dark');
     }
-    localStorage.setItem(PREF_STORAGE_KEYS.theme, theme);
+    localStorage.setItem(STORAGE_KEYS.theme, theme);
   }, [theme]);
 
   const streakStats = useMemo(() => {
@@ -525,11 +347,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Automatically unlock and persist Milestone Achievements when criteria are met
   useEffect(() => {
-    const uid = user?.uid;
-    if (!uid || !progressReady || initialHydrationDoneRef.current !== uid) {
-      return;
-    }
-
     const qualified = computeQualifiedAchievements({
       completedLessons,
       longestStreak: streakStats.longestStreak,
@@ -544,7 +361,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     for (const spec of newlyUnlocked) {
       if (!nextAchievements[spec.id]) {
         nextAchievements[spec.id] = {
-          uid,
+          uid: 'local',
           achievementId: spec.id,
           category: spec.category,
           tier: spec.tier,
@@ -556,13 +373,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     earnedAchievementsRef.current = nextAchievements;
     setEarnedAchievements(nextAchievements);
     persistSnapshotNow(progressRef.current, earnedTokensRef.current, nextAchievements);
-  }, [
-    completedLessons,
-    streakStats.longestStreak,
-    streakStats.currentStreak,
-    user?.uid,
-    progressReady,
-  ]);
+  }, [completedLessons, streakStats.longestStreak, streakStats.currentStreak]);
 
   const setLang = (next: Language) => setLangState(next);
   const toggleLang = () => setLangState((prev) => (prev === 'en' ? 'ar' : 'en'));
@@ -573,24 +384,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     isLanguageUnlockedWith(languageId, completedLessons);
 
   const openLanguage = (languageId: string) => {
-    if (!activeUidRef.current) {
-      setView('signin');
-      return;
-    }
     if (!isLanguageUnlocked(languageId)) {
       return;
     }
     setSelectedLanguageIdState(languageId);
     setViewState('roadmap');
-    progressRef.current = {
+    const nextProgress: WorkspaceProgressPayload = {
       ...progressRef.current,
       selectedLanguageId: languageId,
       lastView: 'roadmap',
     };
-    scheduleNavigationSync();
-    if (window.location.pathname !== '/') {
-      window.history.pushState({}, '', '/');
-    }
+    progressRef.current = nextProgress;
+    persistSnapshotNow(nextProgress);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -598,10 +403,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     isLessonUnlockedWith(lessonId, completedLessons);
 
   const openLesson = (lessonId: string) => {
-    if (!activeUidRef.current) {
-      setView('signin');
-      return;
-    }
     if (!isLessonUnlocked(lessonId)) {
       return;
     }
@@ -618,17 +419,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setActiveLessonTabState('learn');
     }
     setViewState('lesson');
-    progressRef.current = {
+    const nextProgress: WorkspaceProgressPayload = {
       ...progressRef.current,
       selectedLanguageId: nextLangId,
       activeLessonId: lessonId,
       activeLessonTab: nextTab,
       lastView: 'lesson',
     };
-    scheduleNavigationSync();
-    if (window.location.pathname !== '/') {
-      window.history.pushState({}, '', '/');
-    }
+    progressRef.current = nextProgress;
+    persistSnapshotNow(nextProgress);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -642,7 +441,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return {
       ...currentTokens,
       [lessonId]: {
-        uid: user?.uid ?? 'local',
+        uid: 'local',
         lessonId,
         tokenCode: spec.tokenCode,
         languageId: spec.languageId,
@@ -670,7 +469,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const nextDates = !alreadyDone
       ? sanitizeDateList([currentDayKey, ...cur.completionDates])
       : cur.completionDates;
-    const nextProgress: RemoteProgressPayload = {
+    const nextProgress: WorkspaceProgressPayload = {
       ...cur,
       completedLessons: nextCompleted,
       completionDates: nextDates,
@@ -684,7 +483,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setCompletionDates(nextDates);
     }
     setEarnedTokens(nextTokens);
-    cancelPendingNavSync();
     persistSnapshotNow(nextProgress, nextTokens);
   };
 
@@ -699,7 +497,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       ? sanitizeDateList([currentDayKey, ...cur.completionDates])
       : cur.completionDates;
 
-    const nextProgress: RemoteProgressPayload = {
+    const nextProgress: WorkspaceProgressPayload = {
       ...cur,
       completedLessons: nextCompleted,
       completionDates: nextDates,
@@ -715,7 +513,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setCompletionDates(nextDates);
     }
     setEarnedTokens(nextTokens);
-    cancelPendingNavSync();
     persistSnapshotNow(nextProgress, nextTokens);
   };
 
@@ -723,10 +520,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const cur = progressRef.current;
     if (cur.readLessons.includes(lessonId)) return;
     const nextRead = [...cur.readLessons, lessonId];
-    const nextProgress: RemoteProgressPayload = { ...cur, readLessons: nextRead };
+    const nextProgress: WorkspaceProgressPayload = { ...cur, readLessons: nextRead };
     progressRef.current = nextProgress;
     setReadLessons(nextRead);
-    cancelPendingNavSync();
     persistSnapshotNow(nextProgress);
   };
 
@@ -737,10 +533,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const cur = progressRef.current;
     if (cur.passedExercises.includes(lessonId)) return;
     const nextExercises = [...cur.passedExercises, lessonId];
-    const nextProgress: RemoteProgressPayload = { ...cur, passedExercises: nextExercises };
+    const nextProgress: WorkspaceProgressPayload = { ...cur, passedExercises: nextExercises };
     progressRef.current = nextProgress;
     setPassedExercises(nextExercises);
-    cancelPendingNavSync();
     persistSnapshotNow(nextProgress);
   };
 
@@ -762,7 +557,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       ? sanitizeDateList([currentDayKey, ...cur.completionDates])
       : cur.completionDates;
 
-    const nextProgress: RemoteProgressPayload = {
+    const nextProgress: WorkspaceProgressPayload = {
       ...cur,
       quizScores: nextScores,
       completedLessons: nextCompleted,
@@ -780,26 +575,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setCompletionDates(nextDates);
       setEarnedTokens(nextTokens);
     }
-    cancelPendingNavSync();
     persistSnapshotNow(nextProgress, nextTokens);
   };
 
   const savePlaygroundCode = (codeToSave?: PlaygroundStarter) => {
-    const uid = user?.uid;
-    if (!uid) return;
     const payload = codeToSave ?? playgroundCode;
     try {
-      localStorage.setItem(getPlaygroundStorageKey(uid), JSON.stringify(payload));
+      localStorage.setItem(STORAGE_KEYS.playground, JSON.stringify(payload));
     } catch {
       // Ignore storage errors
     }
   };
 
   const loadStarterInPlayground = (starter: PlaygroundStarter) => {
-    if (!activeUidRef.current) {
-      setView('signin');
-      return;
-    }
     setPlaygroundCode(starter);
     savePlaygroundCode(starter);
     setView('playground');
@@ -807,7 +595,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const resetProgress = () => {
-    cancelPendingNavSync();
     const emptyProgress = createEmptyProgress();
     progressRef.current = emptyProgress;
     earnedTokensRef.current = {};
@@ -823,51 +610,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setActiveLessonTabState('learn');
     setSelectedLanguageIdState(null);
 
-    const uid = user?.uid;
-    if (uid) {
-      try {
-        localStorage.removeItem(getPlaygroundStorageKey(uid));
-      } catch {
-        // Ignore storage errors
-      }
-      setPlaygroundCode(playgroundTemplates.card);
-      void clearAccountSnapshot(uid);
+    try {
+      localStorage.removeItem(STORAGE_KEYS.playground);
+    } catch {
+      // Ignore storage errors
     }
-  };
-
-  const applyAuthenticatedUser = (nextUser: AuthUser) => {
-    if (activeUidRef.current !== nextUser.uid) {
-      activeUidRef.current = nextUser.uid;
-      initialHydrationDoneRef.current = null;
-      resetInMemoryProgress(nextUser.uid);
-      setProgressReady(false);
-    }
-    setUser(nextUser);
-  };
-
-  const signInWithGoogle = async () => {
-    const nextUser = await openGoogleOAuthPopup();
-    applyAuthenticatedUser(nextUser);
-  };
-
-  const switchGoogleAccount = async () => {
-    cancelPendingNavSync();
-    const nextUser = await openGoogleOAuthPopup();
-    applyAuthenticatedUser(nextUser);
-  };
-
-  const signOutUser = async () => {
-    cancelPendingNavSync();
-    await logoutSession();
-    activeUidRef.current = null;
-    initialHydrationDoneRef.current = null;
-    resetInMemoryProgress(null);
-    setProgressReady(false);
-    setUser(null);
-    setViewState('signin');
-    if (window.location.pathname !== '/signin') {
-      window.history.replaceState({}, '', '/signin');
-    }
+    setPlaygroundCode(playgroundTemplates.card);
+    clearWorkspaceSnapshot();
   };
 
   return (
@@ -911,12 +660,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         savePlaygroundCode,
         loadStarterInPlayground,
         resetProgress,
-        user,
-        authLoading,
-        progressReady,
-        signInWithGoogle,
-        switchGoogleAccount,
-        signOutUser,
       }}
     >
       {children}
